@@ -1,7 +1,13 @@
-# corners_sportmonks_streamlit.py
+# footystats_corners_streamlit.py
 # ----------------------------------------------------
-# Streamlit: Buscar partidos con apuestas de CÓRNERS
-# usando Sportmonks Football API v3.
+# Streamlit: Buscar partidos con alto potencial de CÓRNERS
+# usando FootyStats Football Data API (api.football-data-api.com)
+# ----------------------------------------------------
+# Reqs:
+#   pip install streamlit requests pandas
+#
+# Cómo correr:
+#   streamlit run footystats_corners_streamlit.py
 # ----------------------------------------------------
 
 import datetime
@@ -11,173 +17,171 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BASE_URL = "https://api.sportmonks.com/v3"
-FOOTBALL_BASE = f"{BASE_URL}/football"
+BASE_URL = "https://api.football-data-api.com"
 
 
 # ======================================================
 # Clase principal
 # ======================================================
 
-class SportmonksCornersFinder:
-    def __init__(self, api_token: str):
-        if not api_token:
-            raise ValueError("Debes proporcionar tu API token de Sportmonks.")
-        self.api_token = api_token
+class FootyStatsCornersFinder:
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("Debes proporcionar tu API key de FootyStats.")
+        self.api_key = api_key
 
-    def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         if params is None:
             params = {}
-        params.setdefault("api_token", self.api_token)
+        params.setdefault("key", self.api_key)
 
+        url = f"{BASE_URL}/{path.lstrip('/')}"
         resp = requests.get(url, params=params, timeout=25)
+
         if not resp.ok:
             raise RuntimeError(
                 f"Error en petición GET {url} "
                 f"({resp.status_code}): {resp.text[:400]}"
             )
-        return resp.json()
+        # FootyStats a veces devuelve lista directamente, a veces dict
+        try:
+            return resp.json()
+        except Exception:
+            raise RuntimeError(f"Respuesta no es JSON válida: {resp.text[:400]}")
 
-    # ---------- Fixtures por fecha ----------
-    def get_fixtures_by_date_with_odds(self, date_str: str) -> List[Dict[str, Any]]:
-        """
-        Fixtures por fecha que tengan odds.
-        GET /v3/football/fixtures/date/{date}?filters=havingOdds&include=league;participants
-        """
-        url = f"{FOOTBALL_BASE}/fixtures/date/{date_str}"
-        params = {
-            "filters": "havingOdds",
-            "include": "league;participants",
-        }
-        data = self._get(url, params=params)
-        return data.get("data", []) if isinstance(data, dict) else data or []
-
-    # ---------- Fixtures por round ----------
-    def get_fixtures_by_round_with_odds(self, round_id: int) -> List[Dict[str, Any]]:
-        """
-        Fixtures de un round con odds.
-        GET /v3/football/rounds/{id}?include=fixtures.league;fixtures.participants
-        """
-        url = f"{FOOTBALL_BASE}/rounds/{round_id}"
-        params = {
-            "include": "fixtures.league;fixtures.participants",
-        }
-        data = self._get(url, params=params)
-        round_data = data.get("data") if isinstance(data, dict) else {} or {}
-
-        fixtures_raw = round_data.get("fixtures") or []
-
-        # Puede venir como dict con data o como lista directa
-        if isinstance(fixtures_raw, dict):
-            fixtures = fixtures_raw.get("data", []) or []
-        elif isinstance(fixtures_raw, list):
-            fixtures = fixtures_raw
-        else:
-            fixtures = []
-
-        fixtures_with_odds = [fx for fx in fixtures if fx.get("has_odds")]
-        return fixtures_with_odds
-
-    # ---------- Odds de CÓRNERS por fixture ----------
-    def get_corner_odds_for_fixture(
+    # ---------- 1) Partidos por fecha ----------
+    def get_matches_by_date(
         self,
-        fixture_id: int,
+        date_str: str,
+        timezone: str = "Etc/UTC",
     ) -> List[Dict[str, Any]]:
         """
-        Pide TODAS las pre-match odds del fixture y filtra las que
-        tengan 'corner' en la descripción del mercado.
-
-        GET /v3/football/odds/pre-match/fixtures/{ID}
+        Usa endpoint:
+        GET /todays-matches?key=YOURKEY&date=YYYY-MM-DD&timezone=Etc/UTC
+        Devuelve lista de partidos de esa fecha (máx 200).
         """
-        url = f"{FOOTBALL_BASE}/odds/pre-match/fixtures/{fixture_id}"
-        data = self._get(url)
+        data = self._get(
+            "/todays-matches",
+            params={"date": date_str, "timezone": timezone},
+        )
 
-        if isinstance(data, dict):
-            odds_list = data.get("data", []) or []
+        # Puede venir como lista directa o dict con "data"
+        if isinstance(data, list):
+            matches = data
+        elif isinstance(data, dict):
+            matches = data.get("data", []) or []
         else:
-            odds_list = data or []
+            matches = []
 
-        corner_odds = []
-        for o in odds_list:
-            desc = (o.get("market_description") or "").lower()
-            # aquí puedes afinar el filtro si ves otro texto
-            if "corner" in desc:
-                corner_odds.append(o)
+        return matches
 
-        return corner_odds
+    # ---------- 2) Detalle de partido ----------
+    def get_match_details(self, match_id: int) -> Dict[str, Any]:
+        """
+        Usa endpoint:
+        GET /match?key=YOURKEY&match_id=ID
+        Devuelve stats completos, incluyendo corners_potential, corners_o85_potential, etc.
+        """
+        data = self._get(
+            "/match",
+            params={"match_id": match_id},
+        )
 
-    # ---------- DataFrame con partidos que sí tienen corners ----------
+        # Si viniera como lista de un solo elemento, tomamos el primero
+        if isinstance(data, list):
+            return data[0] if data else {}
+        elif isinstance(data, dict):
+            # Algunos planes devuelven {"data": {...}}
+            if "data" in data and isinstance(data["data"], dict):
+                return data["data"]
+            return data
+        else:
+            return {}
+
+    # ---------- 3) DataFrame de partidos con info de corners ----------
     def build_corners_dataframe(
         self,
-        fixtures: List[Dict[str, Any]],
+        matches: List[Dict[str, Any]],
+        min_corners_potential: float = 0.0,
     ) -> pd.DataFrame:
         filas = []
 
-        for fx in fixtures:
-            fixture_id = fx.get("id")
-            starting_at = fx.get("starting_at")
+        for m in matches:
+            match_id = m.get("id")
+            if match_id is None:
+                continue
 
-            # Liga
-            league = fx.get("league") or {}
-            if isinstance(league, dict):
-                league_data = league.get("data") or league
-            else:
-                league_data = {}
-            league_name = league_data.get("name")
+            # IDs básicos desde todays-matches
+            home_id = m.get("homeID")
+            away_id = m.get("awayID")
+            total_corners = m.get("totalCornerCount")
+            date_unix = m.get("date_unix")
 
-            # Equipos (participants con meta.location)
-            home_name = None
-            away_name = None
-            participants_raw = fx.get("participants") or []
-
-            if isinstance(participants_raw, dict):
-                participants = participants_raw.get("data", []) or []
-            elif isinstance(participants_raw, list):
-                participants = participants_raw
-            else:
-                participants = []
-
-            for p in participants:
-                meta = p.get("meta") or {}
-                loc = (meta.get("location") or "").lower()
-                name = p.get("name")
-                if loc == "home":
-                    home_name = name
-                elif loc == "away":
-                    away_name = name
-
+            # Detalles (incluye stats pre-match)
             try:
-                corner_odds = self.get_corner_odds_for_fixture(fixture_id)
+                details = self.get_match_details(match_id)
             except Exception:
-                corner_odds = []
+                details = {}
 
-            if corner_odds:
-                filas.append(
-                    {
-                        "Fixture ID": fixture_id,
-                        "Fecha/hora": starting_at,
-                        "Liga": league_name,
-                        "Local": home_name,
-                        "Visitante": away_name,
-                        "Líneas corners (total)": len(corner_odds),
-                    }
-                )
+            corners_potential = details.get("corners_potential")
+
+            # Filtrado por potencial de corners (si se configuró y el valor existe)
+            if (
+                min_corners_potential is not None
+                and corners_potential is not None
+                and float(corners_potential) < float(min_corners_potential)
+            ):
+                continue
+
+            # Otros campos de interés (si existen)
+            c_o85 = details.get("corners_o85_potential")
+            c_o95 = details.get("corners_o95_potential")
+            c_o105 = details.get("corners_o105_potential")
+
+            # Algunos planes incluyen nombres; si no, se quedarán en None
+            home_name = details.get("home_name") or details.get("team_a_name")
+            away_name = details.get("away_name") or details.get("team_b_name")
+            league_name = details.get("competition_name")
+
+            filas.append(
+                {
+                    "Match ID": match_id,
+                    "Home ID": home_id,
+                    "Away ID": away_id,
+                    "Home Name": home_name,
+                    "Away Name": away_name,
+                    "League": league_name,
+                    "Fecha UNIX": date_unix,
+                    "Total Corners (actual)": total_corners,
+                    "corners_potential": corners_potential,
+                    "corners_o85_potential": c_o85,
+                    "corners_o95_potential": c_o95,
+                    "corners_o105_potential": c_o105,
+                }
+            )
 
         if not filas:
             return pd.DataFrame(
                 columns=[
-                    "Fixture ID",
-                    "Fecha/hora",
-                    "Liga",
-                    "Local",
-                    "Visitante",
-                    "Líneas corners (total)",
+                    "Match ID",
+                    "Home ID",
+                    "Away ID",
+                    "Home Name",
+                    "Away Name",
+                    "League",
+                    "Fecha UNIX",
+                    "Total Corners (actual)",
+                    "corners_potential",
+                    "corners_o85_potential",
+                    "corners_o95_potential",
+                    "corners_o105_potential",
                 ]
             )
 
         df = pd.DataFrame(filas)
-        if "Fecha/hora" in df.columns:
-            df = df.sort_values("Fecha/hora")
+        # Ordenamos por mayor corners_potential si existe
+        if "corners_potential" in df.columns:
+            df = df.sort_values("corners_potential", ascending=False)
         return df
 
 
@@ -187,109 +191,112 @@ class SportmonksCornersFinder:
 
 def main():
     st.set_page_config(
-        page_title="Corners Finder — Sportmonks",
-        page_icon="⚽",
+        page_title="Corners Finder — FootyStats",
+        page_icon="🏟️",
         layout="wide",
     )
 
-    st.title("⚽ Corners Finder — Sportmonks (API v3)")
+    st.title("🏟️ Corners Finder — FootyStats API")
     st.write(
-        "App para encontrar **partidos que sí tienen mercados de tiros de esquina** "
-        "usando la API de Sportmonks."
+        "App para encontrar **partidos con alto potencial de córners** "
+        "usando la API de FootyStats (football-data-api.com)."
     )
 
     st.sidebar.header("Configuración")
 
-    api_token = st.sidebar.text_input(
-        "API Token de Sportmonks",
+    api_key = st.sidebar.text_input(
+        "FootyStats API Key",
         type="password",
-        help="Pega tu api_token de Sportmonks (API v3).",
+        help="Pega aquí tu API key de FootyStats.",
     )
 
-    modo = st.sidebar.radio(
-        "Modo de búsqueda",
-        ["Por fecha", "Por Round ID"],
+    fecha = st.sidebar.date_input(
+        "Fecha",
+        value=datetime.date.today(),
+        help="Fecha de los partidos a analizar.",
+    )
+    fecha_str = fecha.strftime("%Y-%m-%d")
+
+    timezone = st.sidebar.text_input(
+        "Timezone (opcional)",
+        value="Etc/UTC",
+        help="Formato TZ, por ejemplo 'Europe/London', 'America/Mexico_City'. "
+             "Si lo dejas vacío, se usa Etc/UTC.",
+    ) or "Etc/UTC"
+
+    min_corners_potential = st.sidebar.number_input(
+        "Mínimo corners_potential",
+        min_value=0.0,
+        max_value=30.0,
+        value=0.0,
+        step=0.5,
+        help=(
+            "Filtra partidos cuyo `corners_potential` (promedio de córners "
+            "pre-partido) sea al menos este valor. Deja 0 si no quieres filtrar."
+        ),
     )
 
-    if modo == "Por fecha":
-        fecha = st.sidebar.date_input(
-            "Fecha",
-            value=datetime.date.today(),
-            help="Fecha de los partidos que quieres revisar.",
-        )
-        fecha_str = fecha.strftime("%Y-%m-%d")
-        round_id = None
-    else:
-        round_id = st.sidebar.number_input(
-            "Round ID",
-            min_value=1,
-            step=1,
-            help="Round ID para usar GET Round by ID.",
-        )
-        fecha_str = None
-
-    buscar_btn = st.sidebar.button("🔍 Buscar partidos con corners")
+    buscar_btn = st.sidebar.button("🔍 Buscar partidos con potencial de corners")
 
     st.markdown("---")
 
     if not buscar_btn:
         st.info(
-            "Configura el token y los parámetros en la barra lateral y luego haz clic en "
-            "**“Buscar partidos con corners”**."
+            "Configura tu API key y la fecha en la barra lateral y luego haz clic en "
+            "**“Buscar partidos con potencial de corners”**."
         )
         return
 
-    if not api_token:
-        st.error("Debes ingresar tu **API Token** de Sportmonks.")
+    if not api_key:
+        st.error("Debes ingresar tu **FootyStats API key**.")
         return
 
     try:
-        finder = SportmonksCornersFinder(api_token)
+        finder = FootyStatsCornersFinder(api_key)
 
-        # 1) Fixtures según el modo
-        if modo == "Por fecha":
-            st.subheader(f"Fixtures con odds en la fecha {fecha_str}")
-            with st.spinner("Cargando fixtures por fecha (solo los que tienen odds)..."):
-                fixtures = finder.get_fixtures_by_date_with_odds(fecha_str)
-        else:
-            st.subheader(f"Fixtures con odds en el round {int(round_id)}")
-            with st.spinner("Cargando fixtures del round (solo los que tienen odds)..."):
-                fixtures = finder.get_fixtures_by_round_with_odds(int(round_id))
+        # 1) Partidos por fecha
+        st.subheader(f"Partidos para la fecha {fecha_str}")
+        with st.spinner("Cargando partidos desde FootyStats..."):
+            matches = finder.get_matches_by_date(fecha_str, timezone=timezone)
 
-        st.write(f"Total de fixtures con **algún tipo de odds**: `{len(fixtures)}`")
+        st.write(f"Total de partidos devueltos por la API: `{len(matches)}`")
 
-        if not fixtures:
-            st.warning("No se encontraron fixtures con odds para esos parámetros.")
+        if not matches:
+            st.warning("La API no devolvió partidos para esa fecha (revisa ligas activas en tu cuenta).")
             return
 
-        # 2) Filtrar los que tienen corners
-        with st.spinner("Filtrando fixtures que tienen mercados de corners..."):
-            df_resultados = finder.build_corners_dataframe(fixtures)
+        # 2) Construir tabla con info de corners
+        with st.spinner("Calculando potencial de corners por partido..."):
+            df_resultados = finder.build_corners_dataframe(
+                matches,
+                min_corners_potential=min_corners_potential,
+            )
 
-        st.markdown("## ✅ Partidos con apuestas de **corners**")
+        st.markdown("## ✅ Partidos con **stats de corners**")
 
         if df_resultados.empty:
             st.warning(
-                "De los fixtures con odds encontrados, ninguno tiene mercados de corners "
-                "(según 'market_description' contenga la palabra 'corner')."
+                "No se encontraron partidos que cumplan con el filtro de `corners_potential`. "
+                "Prueba bajando el mínimo o verifica qué devuelve la API para esa fecha."
             )
         else:
             st.success(
-                f"Se encontraron `{len(df_resultados)}` partidos con **apuestas de corners**."
+                f"Se encontraron `{len(df_resultados)}` partidos con información de corners "
+                f"(filtrados por corners_potential ≥ {min_corners_potential})."
             )
             st.dataframe(df_resultados, use_container_width=True)
 
-            # Botón para descargar CSV
+            # Descargar CSV
             csv = df_resultados.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="⬇️ Descargar resultados en CSV",
                 data=csv,
-                file_name="corners_sportmonks.csv",
+                file_name=f"footystats_corners_{fecha_str}.csv",
                 mime="text/csv",
             )
 
     except Exception as e:
-        st.error("Ocurrió un error al consultar la API de Sportmonks.")
+        st.error("Ocurrió un error al consultar la API de FootyStats.")
         st.code(str(e))
 
 
