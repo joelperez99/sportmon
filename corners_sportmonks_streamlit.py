@@ -1,7 +1,7 @@
 # corners_sportmonks_streamlit.py
 # ----------------------------------------------------
-# UI gráfica en Streamlit para encontrar partidos
-# con mercados de "Corners" usando Sportmonks (API v3).
+# Streamlit: Buscar partidos con apuestas de CÓRNERS
+# usando Sportmonks Football API v3.
 # ----------------------------------------------------
 
 import datetime
@@ -13,7 +13,6 @@ import streamlit as st
 
 BASE_URL = "https://api.sportmonks.com/v3"
 FOOTBALL_BASE = f"{BASE_URL}/football"
-ODDS_BASE = f"{BASE_URL}/odds"   # para markets (no lleva /football)
 
 
 # ======================================================
@@ -39,30 +38,7 @@ class SportmonksCornersFinder:
             )
         return resp.json()
 
-    # ---------- 1) Markets de corners ----------
-    def get_corner_market_ids(self, search_term: str = "corner") -> List[Dict[str, Any]]:
-        """
-        Busca markets que contengan 'corner'.
-        GET /v3/odds/markets/search/{search_term}
-        """
-        url = f"{ODDS_BASE}/markets/search/{search_term}"
-        data = self._get(url)
-        markets = data.get("data", []) if isinstance(data, dict) else data or []
-
-        corner_markets = []
-        for m in markets:
-            name = (m.get("name") or "").lower()
-            if "corner" in name:
-                corner_markets.append(
-                    {
-                        "id": m.get("id"),
-                        "name": m.get("name"),
-                        "developer_name": m.get("developer_name"),
-                    }
-                )
-        return corner_markets
-
-    # ---------- 2) Fixtures por fecha ----------
+    # ---------- Fixtures por fecha ----------
     def get_fixtures_by_date_with_odds(self, date_str: str) -> List[Dict[str, Any]]:
         """
         Fixtures por fecha que tengan odds.
@@ -76,7 +52,7 @@ class SportmonksCornersFinder:
         data = self._get(url, params=params)
         return data.get("data", []) if isinstance(data, dict) else data or []
 
-    # ---------- 3) Fixtures por round ----------
+    # ---------- Fixtures por round ----------
     def get_fixtures_by_round_with_odds(self, round_id: int) -> List[Dict[str, Any]]:
         """
         Fixtures de un round con odds.
@@ -102,61 +78,58 @@ class SportmonksCornersFinder:
         fixtures_with_odds = [fx for fx in fixtures if fx.get("has_odds")]
         return fixtures_with_odds
 
-    # ---------- 4) Odds de corners por fixture ----------
+    # ---------- Odds de CÓRNERS por fixture ----------
     def get_corner_odds_for_fixture(
         self,
         fixture_id: int,
-        market_ids: List[int],
     ) -> List[Dict[str, Any]]:
         """
-        Pre-match odds para un fixture en varios markets de corners.
-        GET /v3/football/odds/pre-match/fixtures/{fixture_id}/markets/{market_id}
+        Pide TODAS las pre-match odds del fixture y filtra las que
+        tengan 'corner' en la descripción del mercado.
+
+        GET /v3/football/odds/pre-match/fixtures/{ID}
         """
-        if not market_ids:
-            return []
+        url = f"{FOOTBALL_BASE}/odds/pre-match/fixtures/{fixture_id}"
+        data = self._get(url)
 
-        all_corner_odds = []
-        for m_id in market_ids:
-            url = f"{FOOTBALL_BASE}/odds/pre-match/fixtures/{fixture_id}/markets/{m_id}"
-            data = self._get(url)
+        if isinstance(data, dict):
+            odds_list = data.get("data", []) or []
+        else:
+            odds_list = data or []
 
-            if isinstance(data, dict):
-                odds_list = data.get("data", []) or []
-            else:
-                odds_list = data or []
+        corner_odds = []
+        for o in odds_list:
+            desc = (o.get("market_description") or "").lower()
+            # aquí puedes afinar el filtro si ves otro texto
+            if "corner" in desc:
+                corner_odds.append(o)
 
-            if odds_list:
-                all_corner_odds.extend(odds_list)
-        return all_corner_odds
+        return corner_odds
 
-    # ---------- 5) DataFrame con partidos que sí tienen corners ----------
+    # ---------- DataFrame con partidos que sí tienen corners ----------
     def build_corners_dataframe(
         self,
         fixtures: List[Dict[str, Any]],
-        corner_markets: List[Dict[str, Any]],
     ) -> pd.DataFrame:
         filas = []
-        market_ids = [m["id"] for m in corner_markets]
 
         for fx in fixtures:
             fixture_id = fx.get("id")
             starting_at = fx.get("starting_at")
 
+            # Liga
             league = fx.get("league") or {}
             if isinstance(league, dict):
                 league_data = league.get("data") or league
             else:
                 league_data = {}
-
             league_name = league_data.get("name")
 
-            # API v3: equipos vienen en participants
+            # Equipos (participants con meta.location)
             home_name = None
             away_name = None
-
             participants_raw = fx.get("participants") or []
 
-            # Puede venir como dict con data o como lista directa
             if isinstance(participants_raw, dict):
                 participants = participants_raw.get("data", []) or []
             elif isinstance(participants_raw, list):
@@ -174,7 +147,7 @@ class SportmonksCornersFinder:
                     away_name = name
 
             try:
-                corner_odds = self.get_corner_odds_for_fixture(fixture_id, market_ids)
+                corner_odds = self.get_corner_odds_for_fixture(fixture_id)
             except Exception:
                 corner_odds = []
 
@@ -273,21 +246,7 @@ def main():
     try:
         finder = SportmonksCornersFinder(api_token)
 
-        # 1) Markets de corners
-        with st.spinner("Buscando markets relacionados con corners..."):
-            corner_markets = finder.get_corner_market_ids()
-
-        if not corner_markets:
-            st.warning(
-                "No se encontraron markets que contengan 'corner'. "
-                "Revisa tu plan o los markets disponibles en Sportmonks."
-            )
-            return
-
-        st.subheader("Markets de corners detectados")
-        st.table(pd.DataFrame(corner_markets))
-
-        # 2) Fixtures según el modo
+        # 1) Fixtures según el modo
         if modo == "Por fecha":
             st.subheader(f"Fixtures con odds en la fecha {fecha_str}")
             with st.spinner("Cargando fixtures por fecha (solo los que tienen odds)..."):
@@ -303,15 +262,16 @@ def main():
             st.warning("No se encontraron fixtures con odds para esos parámetros.")
             return
 
-        # 3) Filtrar los que tienen corners
+        # 2) Filtrar los que tienen corners
         with st.spinner("Filtrando fixtures que tienen mercados de corners..."):
-            df_resultados = finder.build_corners_dataframe(fixtures, corner_markets)
+            df_resultados = finder.build_corners_dataframe(fixtures)
 
         st.markdown("## ✅ Partidos con apuestas de **corners**")
 
         if df_resultados.empty:
             st.warning(
-                "De los fixtures con odds encontrados, ninguno tiene mercados de corners."
+                "De los fixtures con odds encontrados, ninguno tiene mercados de corners "
+                "(según 'market_description' contenga la palabra 'corner')."
             )
         else:
             st.success(
