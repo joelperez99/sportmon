@@ -1,72 +1,77 @@
-# app_links_streamlit.py
-# -----------------------------------------
-# Streamlit – Extractor sencillo de links
-# -----------------------------------------
+# app_caliente_ids.py
+# Streamlit — Obtener IDs de partidos (eventId) desde Caliente Futbol
 
+import re
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Extractor de links", page_icon="🔗", layout="wide")
+# ===================== FUNCIÓN PRINCIPAL =====================
 
-st.title("🔗 Extractor de links de una página web")
-st.write("Ingresa una URL y obtén todos los enlaces <a href> de esa página.")
+def get_match_ids_from_html(url: str):
+    """
+    Descarga el HTML de la página y extrae todos los eventId que encuentre.
+    Regresa una lista de IDs únicos como strings.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/134.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+    }
 
-# ========= ENTRADA =========
-url = st.text_input("URL de la página", value="https://example.com")
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    html = resp.text
 
-if st.button("Extraer links"):
+    # Busca "eventId":123456 o "eventId":"123456"
+    ids = re.findall(r'"eventId"\s*:\s*"?(\d+)"?', html)
+
+    # Quita duplicados y ordena
+    unique_ids = sorted(set(ids), key=int)
+    return unique_ids
+
+# ===================== UI STREAMLIT =====================
+
+st.set_page_config(page_title="IDs Caliente Futbol", page_icon="⚽", layout="centered")
+
+st.title("⚽ Obtener IDs de partidos de Caliente.mx")
+st.caption("Extrae los `eventId` desde la página de Futbol.")
+
+default_url = "https://sports.caliente.mx/es_MX/Futbol"
+url = st.text_input("URL de la página de Futbol", value=default_url)
+
+if st.button("🔍 Obtener IDs de partidos"):
     if not url.strip():
-        st.error("Ingresa una URL válida.")
+        st.error("Por favor ingresa una URL válida.")
     else:
-        # Asegurarnos de que tenga http/https
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = "https://" + url.strip()
-
         try:
-            st.info(f"Solicitando: {url}")
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
+            with st.spinner("Descargando página y extrayendo IDs..."):
+                ids = get_match_ids_from_html(url)
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            data = []
-            for a in soup.find_all("a"):
-                href = a.get("href")
-                if not href:
-                    continue
-
-                texto = (a.get_text(strip=True) or "").strip()
-                href_abs = urljoin(url, href)
-
-                data.append({
-                    "texto_visible": texto,
-                    "href": href,
-                    "href_absoluta": href_abs,
-                })
-
-            if not data:
-                st.warning("No se encontraron enlaces <a> en la página.")
-            else:
-                df = pd.DataFrame(data)
-                st.success(f"Se encontraron {len(df)} links.")
+            if ids:
+                st.success(f"Se encontraron {len(ids)} IDs de partido.")
+                df = pd.DataFrame({"eventId": ids})
                 st.dataframe(df, use_container_width=True)
 
-                # Descargar CSV
-                csv = df.to_csv(index=False).encode("utf-8-sig")
+                csv = df.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    "📥 Descargar CSV",
+                    "⬇️ Descargar IDs en CSV",
                     data=csv,
-                    file_name="links_extraidos.csv",
-                    mime="text/csv"
+                    file_name="caliente_event_ids.csv",
+                    mime="text/csv",
                 )
-
-        except requests.exceptions.RequestException as e:
-            st.error("Error al hacer la petición HTTP.")
-            st.code(str(e))
+            else:
+                st.warning("No se encontró ningún `eventId` en el HTML. "
+                           "Es posible que Caliente cargue los partidos vía API/JS.")
         except Exception as e:
-            st.error("Ocurrió un error inesperado.")
-            st.code(str(e))
+            st.error(f"Ocurrió un error: {e}")
+            st.stop()
+
+st.markdown("---")
+st.markdown(
+    "💡 Tip: si no encuentra IDs, habría que copiar la URL del endpoint de la API "
+    "desde **F12 → Network** y hacer otro script que consuma directamente ese JSON."
+)
