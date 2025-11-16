@@ -47,7 +47,7 @@ class SportmonksCornersFinder:
         """
         url = f"{ODDS_BASE}/markets/search/{search_term}"
         data = self._get(url)
-        markets = data.get("data", []) or []
+        markets = data.get("data", []) if isinstance(data, dict) else data or []
 
         corner_markets = []
         for m in markets:
@@ -71,11 +71,10 @@ class SportmonksCornersFinder:
         url = f"{FOOTBALL_BASE}/fixtures/date/{date_str}"
         params = {
             "filters": "havingOdds",
-            # En API v3 ya no existe localTeam/visitorTeam -> ahora es participants
             "include": "league;participants",
         }
         data = self._get(url, params=params)
-        return data.get("data", []) or []
+        return data.get("data", []) if isinstance(data, dict) else data or []
 
     # ---------- 3) Fixtures por round ----------
     def get_fixtures_by_round_with_odds(self, round_id: int) -> List[Dict[str, Any]]:
@@ -88,9 +87,17 @@ class SportmonksCornersFinder:
             "include": "fixtures.league;fixtures.participants",
         }
         data = self._get(url, params=params)
-        round_data = data.get("data") or {}
-        fixtures_wrapper = round_data.get("fixtures") or {}
-        fixtures = fixtures_wrapper.get("data", []) or []
+        round_data = data.get("data") if isinstance(data, dict) else {} or {}
+
+        fixtures_raw = round_data.get("fixtures") or []
+
+        # Puede venir como dict con data o como lista directa
+        if isinstance(fixtures_raw, dict):
+            fixtures = fixtures_raw.get("data", []) or []
+        elif isinstance(fixtures_raw, list):
+            fixtures = fixtures_raw
+        else:
+            fixtures = []
 
         fixtures_with_odds = [fx for fx in fixtures if fx.get("has_odds")]
         return fixtures_with_odds
@@ -112,7 +119,12 @@ class SportmonksCornersFinder:
         for m_id in market_ids:
             url = f"{FOOTBALL_BASE}/odds/pre-match/fixtures/{fixture_id}/markets/{m_id}"
             data = self._get(url)
-            odds_list = data.get("data", []) or []
+
+            if isinstance(data, dict):
+                odds_list = data.get("data", []) or []
+            else:
+                odds_list = data or []
+
             if odds_list:
                 all_corner_odds.extend(odds_list)
         return all_corner_odds
@@ -129,12 +141,29 @@ class SportmonksCornersFinder:
         for fx in fixtures:
             fixture_id = fx.get("id")
             starting_at = fx.get("starting_at")
-            league = (fx.get("league") or {}).get("data") or {}
+
+            league = fx.get("league") or {}
+            if isinstance(league, dict):
+                league_data = league.get("data") or league
+            else:
+                league_data = {}
+
+            league_name = league_data.get("name")
 
             # API v3: equipos vienen en participants
             home_name = None
             away_name = None
-            participants = (fx.get("participants") or {}).get("data", []) or []
+
+            participants_raw = fx.get("participants") or []
+
+            # Puede venir como dict con data o como lista directa
+            if isinstance(participants_raw, dict):
+                participants = participants_raw.get("data", []) or []
+            elif isinstance(participants_raw, list):
+                participants = participants_raw
+            else:
+                participants = []
+
             for p in participants:
                 meta = p.get("meta") or {}
                 loc = (meta.get("location") or "").lower()
@@ -143,8 +172,6 @@ class SportmonksCornersFinder:
                     home_name = name
                 elif loc == "away":
                     away_name = name
-
-            league_name = league.get("name")
 
             try:
                 corner_odds = self.get_corner_odds_for_fixture(fixture_id, market_ids)
